@@ -161,6 +161,248 @@ task({
 
 **Key Insight**: Model limits are not failures—they're constraints to design around. Always have a fallback strategy.
 
+### 2.1. Agent Freezing on Time-Based Limits (Critical Issue)
+
+**Problem**: When time-based model limits are reached (e.g., GPT-5h limit), agents can become **frozen** and block the entire workflow.
+
+**What Happens**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TIME-BASED LIMIT REACHED                     │
+│                                                                 │
+│  Example: "You've reached your GPT-5h limit"                    │
+│                                                                 │
+│  Agent State: FROZEN                                            │
+│  - Cannot complete current task                                 │
+│  - Cannot accept new tasks                                      │
+│  - Workflow is BLOCKED                                          │
+│  - No automatic recovery                                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why This Is Critical**:
+
+| Impact | Description | Severity |
+|--------|-------------|----------|
+| **Workflow Blocked** | Entire consensus workflow stops | 🔴 Critical |
+| **No Auto-Recovery** | System doesn't automatically switch models | 🔴 Critical |
+| **User Unaware** | No notification that agent is frozen | 🟡 High |
+| **Time Waste** | Waiting for limit to reset (hours) | 🟡 High |
+| **Cascading Failure** | Other agents waiting on frozen agent | 🟡 High |
+
+**Detection**:
+
+```typescript
+// Signs that an agent is frozen due to time-based limit:
+// 1. Task hangs indefinitely (no timeout)
+// 2. Error message contains "limit reached" or "quota exceeded"
+// 3. Agent status shows "frozen" or "blocked"
+// 4. No response after timeout period
+
+// Example frozen agent detection:
+const result = await task({
+  subagent_type: "oracle",
+  load_skills: [],
+  run_in_background: false,
+  prompt: "Review this plan..."
+});
+
+// If task hangs beyond timeout, agent may be frozen
+// Timeout should be set via OMX_CONSENSUS_AGENT_TIMEOUT_MS
+```
+
+**Recovery Strategies**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 FROZEN AGENT RECOVERY OPTIONS                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  OPTION 1: TIMEOUT + FALLBACK (Recommended)                     │
+│  ─────────────────────────────────────────                      │
+│  • Set aggressive timeout (OMX_CONSENSUS_AGENT_TIMEOUT_MS)      │
+│  • On timeout, immediately switch to fallback                   │
+│  • Use local analysis or alternative subagent                   │
+│                                                                 │
+│  OPTION 2: MODEL SWITCHING                                      │
+│  ─────────────────────────────────────────                      │
+│  • Configure backup model in oh-my-opencode.json                │
+│  • Automatically retry with backup model                        │
+│  • Requires pre-configuration of alternative models             │
+│                                                                 │
+│  OPTION 3: USER NOTIFICATION                                    │
+│  ─────────────────────────────────────────                      │
+│  • Detect frozen state                                          │
+│  • Notify user: "Agent frozen, limit reached"                   │
+│  • Offer options: wait, switch, abort                           │
+│                                                                 │
+│  OPTION 4: PARALLEL DELEGATION (Prevention)                     │
+│  ─────────────────────────────────────────                      │
+│  • Delegate to multiple agents in parallel                      │
+│  • Use first successful response                                │
+│  • Reduces single-point-of-failure risk                         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Implementation: Timeout + Fallback**:
+
+```typescript
+// Recommended approach: Timeout + Fallback
+async function delegateWithFallback(prompt: string) {
+  const TIMEOUT_MS = 120000; // 2 minutes
+  
+  try {
+    // Attempt primary delegation with timeout
+    const result = await Promise.race([
+      task({
+        subagent_type: "oracle",
+        load_skills: [],
+        run_in_background: false,
+        prompt: prompt
+      }),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('TIMEOUT')), TIMEOUT_MS)
+      )
+    ]);
+    
+    return result;
+    
+  } catch (error) {
+    // Agent may be frozen due to time-based limit
+    if (error.message === 'TIMEOUT' || error.code === 'LIMIT_REACHED') {
+      console.warn('⚠️ Agent frozen or limit reached, using fallback');
+      
+      // Fallback 1: Try alternative subagent
+      try {
+        return await task({
+          subagent_type: "metis", // Alternative agent
+          load_skills: [],
+          run_in_background: false,
+          prompt: prompt
+        });
+      } catch (fallbackError) {
+        // Fallback 2: Local analysis
+        console.warn('⚠️ Fallback agent also failed, using local analysis');
+        return localAnalysis(prompt);
+      }
+    }
+    
+    throw error; // Re-throw unexpected errors
+  }
+}
+```
+
+**Configuration for Model Switching**:
+
+```json
+{
+  "agents": {
+    "oracle": {
+      "mode": "subagent",
+      "category": "consultant",
+      "model": "gpt-4",
+      "fallback_model": "claude-3",  // Backup model
+      "fallback_on_limit": true,      // Auto-switch on limit
+      "timeout_ms": 120000            // Timeout before fallback
+    }
+  }
+}
+```
+
+**Prevention: Parallel Delegation**:
+
+```typescript
+// Prevent frozen agent blocking workflow
+async function delegateWithRedundancy(prompt: string) {
+  // Delegate to multiple agents in parallel
+  const results = await Promise.allSettled([
+    task({ subagent_type: "oracle", load_skills: [], run_in_background: true, prompt }),
+    task({ subagent_type: "metis", load_skills: [], run_in_background: true, prompt }),
+  ]);
+  
+  // Use first successful result
+  const successful = results.find(r => r.status === 'fulfilled');
+  
+  if (successful) {
+    return successful.value;
+  }
+  
+  // All failed - use local analysis
+  return localAnalysis(prompt);
+}
+```
+
+**Best Practices for Frozen Agent Prevention**:
+
+| # | Practice | Implementation |
+|---|----------|----------------|
+| 1 | **Set aggressive timeouts** | `OMX_CONSENSUS_AGENT_TIMEOUT_MS=120000` |
+| 2 | **Configure fallback models** | Add `fallback_model` to agent config |
+| 3 | **Use parallel delegation** | Delegate to multiple agents simultaneously |
+| 4 | **Implement circuit breaker** | Track failures, skip frozen agents |
+| 5 | **Notify user immediately** | Don't let workflow hang silently |
+| 6 | **Have local analysis ready** | Always have non-model fallback |
+
+**Circuit Breaker Pattern**:
+
+```typescript
+// Track agent failures to detect frozen agents
+const agentHealth = {
+  oracle: { failures: 0, lastFailure: null },
+  metis: { failures: 0, lastFailure: null },
+};
+
+const CIRCUIT_BREAKER_THRESHOLD = 3;
+
+function isAgentFrozen(agentType: string): boolean {
+  const health = agentHealth[agentType];
+  
+  // Check if agent has too many recent failures
+  if (health.failures >= CIRCUIT_BREAKER_THRESHOLD) {
+    const timeSinceLastFailure = Date.now() - health.lastFailure;
+    
+    // If failures happened within 5 minutes, agent is likely frozen
+    if (timeSinceLastFailure < 300000) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// Use circuit breaker before delegation
+async function delegateWithCircuitBreaker(agentType: string, prompt: string) {
+  if (isAgentFrozen(agentType)) {
+    console.warn(`⚠️ Agent ${agentType} appears frozen, using fallback`);
+    return localAnalysis(prompt);
+  }
+  
+  try {
+    const result = await task({
+      subagent_type: agentType,
+      load_skills: [],
+      run_in_background: false,
+      prompt
+    });
+    
+    // Reset failure count on success
+    agentHealth[agentType].failures = 0;
+    return result;
+    
+  } catch (error) {
+    // Track failure
+    agentHealth[agentType].failures++;
+    agentHealth[agentType].lastFailure = Date.now();
+    
+    throw error;
+  }
+}
+```
+
+**Key Insight**: Time-based limits cause **agent freezing**, which is more severe than rate limits. Always implement timeout + fallback + circuit breaker patterns to prevent workflow blocking.
+
 ### 3. Sequential Consensus Workflow
 
 **Learning**: Architect and Critic reviews MUST run sequentially, never in parallel.
