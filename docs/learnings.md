@@ -37,7 +37,131 @@ task(
 ask_codex(agent_role: "architect", ...)
 ```
 
-### 2. Sequential Consensus Workflow
+### 2. Model Limit Handling in Delegations
+
+**Learning**: When delegated agents reach model limits (context window, token limits, rate limits), the system must handle gracefully.
+
+**Types of Model Limits**:
+
+| Limit Type | Cause | Behavior | Handling |
+|------------|-------|----------|----------|
+| **Context Window** | Input exceeds model's context limit | Task fails with context overflow error | Truncate input or use chunking |
+| **Token Limit** | Output exceeds max tokens | Response truncated mid-generation | Use continuation or reduce scope |
+| **Rate Limit** | Too many requests per minute | HTTP 429 error, task rejected | Retry with exponential backoff |
+| **Quota Limit** | Daily/monthly quota exceeded | Task rejected with quota error | Queue task or use fallback model |
+
+**What Happens When Limits Are Hit**:
+
+```typescript
+// When model reaches context window limit:
+// 1. Task fails with error
+// 2. Error propagates to calling agent
+// 3. Workflow must decide: retry, fallback, or abort
+
+// Example error handling:
+try {
+  const result = await task({
+    subagent_type: "oracle",
+    load_skills: [],
+    run_in_background: false,
+    prompt: largePrompt
+  });
+} catch (error) {
+  if (error.code === 'CONTEXT_LIMIT_EXCEEDED') {
+    // Option 1: Truncate and retry
+    const truncatedPrompt = truncatePrompt(largePrompt, maxTokens);
+    return task({ ...params, prompt: truncatedPrompt });
+    
+    // Option 2: Use chunking
+    const chunks = chunkPrompt(largePrompt);
+    return processChunks(chunks);
+    
+    // Option 3: Fallback to local analysis
+    return localAnalysis(largePrompt);
+  }
+  
+  if (error.code === 'RATE_LIMIT') {
+    // Retry with exponential backoff
+    await sleep(calculateBackoff(retryCount));
+    return task(params);
+  }
+}
+```
+
+**Graceful Degradation for Model Limits**:
+
+```
+Model Limit Hit
+      │
+      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    ERROR DETECTED                            │
+│  • Context window exceeded                                   │
+│  • Token limit reached                                       │
+│  • Rate limit hit                                            │
+│  • Quota exceeded                                            │
+└─────────────────────────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    RECOVERY STRATEGY                         │
+│                                                              │
+│  1. RETRY (if rate limit)                                    │
+│     └─ Wait + exponential backoff                            │
+│                                                              │
+│  2. TRUNCATE (if context limit)                              │
+│     └─ Reduce input size, preserve key context               │
+│                                                              │
+│  3. CHUNK (if large input)                                   │
+│     └─ Split into smaller tasks, aggregate results           │
+│                                                              │
+│  4. FALLBACK (if quota/quota)                                │
+│     └─ Use local analysis with read/grep/glob                │
+│                                                              │
+│  5. ABORT (if unrecoverable)                                 │
+│     └─ Report error to user with context                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Best Practices for Avoiding Model Limits**:
+
+1. **Pre-flight Check**: Estimate token count before delegation
+2. **Incremental Processing**: Process large inputs in chunks
+3. **Context Pruning**: Remove irrelevant context before delegation
+4. **Summary First**: Summarize large documents before analysis
+5. **Fallback Ready**: Always have local analysis fallback
+
+**Implementation in OMO-Ralplan**:
+
+```typescript
+// Pre-flight token estimation
+function estimateTokens(prompt: string): number {
+  // Rough estimate: ~4 chars per token
+  return Math.ceil(prompt.length / 4);
+}
+
+// Check before delegation
+const estimatedTokens = estimateTokens(planContent);
+const modelContextLimit = getModelContextLimit('oracle');
+
+if (estimatedTokens > modelContextLimit * 0.8) {
+  // Use 80% threshold for safety
+  console.warn('Approaching context limit, truncating...');
+  planContent = truncateToLimit(planContent, modelContextLimit * 0.8);
+}
+
+// Delegate with confidence
+task({
+  subagent_type: "oracle",
+  load_skills: [],
+  run_in_background: false,
+  prompt: planContent
+});
+```
+
+**Key Insight**: Model limits are not failures—they're constraints to design around. Always have a fallback strategy.
+
+### 3. Sequential Consensus Workflow
 
 **Learning**: Architect and Critic reviews MUST run sequentially, never in parallel.
 
@@ -54,7 +178,7 @@ task(subagent_type="oracle", run_in_background=false, ...)
 task(subagent_type="oracle", run_in_background=false, ...)
 ```
 
-### 3. Environment Variable Configuration
+### 4. Environment Variable Configuration
 
 **Learning**: Never hardcode timeouts. Use environment variables for configurability.
 
@@ -65,7 +189,7 @@ task(subagent_type="oracle", run_in_background=false, ...)
 | `OMX_CONSENSUS_TOTAL_TIMEOUT_MS` | 600000 | Total workflow timeout |
 | `OMX_CONSENSUS_MAX_REVIEW_ITERATIONS` | 5 | Max re-review loops |
 
-### 4. Graceful Degradation Strategy
+### 5. Graceful Degradation Strategy
 
 **Learning**: Skills must handle cases where subagents are unavailable.
 
@@ -75,7 +199,7 @@ task(subagent_type="oracle", run_in_background=false, ...)
 3. Fallback: Use `category="deep"` for autonomous analysis
 4. Last resort: Present plan with "expert review unavailable" warning
 
-### 5. Pre-Execution Gate Pattern
+### 6. Pre-Execution Gate Pattern
 
 **Learning**: Underspecified execution requests waste agent cycles.
 
@@ -90,7 +214,7 @@ task(subagent_type="oracle", run_in_background=false, ...)
 
 **Gate Bypass**: `force:` or `!` prefix
 
-### 6. Skill File Structure
+### 7. Skill File Structure
 
 **Learning**: Skills need proper frontmatter and directory structure.
 
@@ -109,7 +233,7 @@ description: Consensus planning with Planner/Architect/Critic loop
 ---
 ```
 
-### 7. Mandatory Task Parameters
+### 8. Mandatory Task Parameters
 
 **Learning**: All `task()` calls must include specific parameters.
 
@@ -118,7 +242,7 @@ description: Consensus planning with Planner/Architect/Critic loop
 - `run_in_background` - Explicit true/false
 - `subagent_type` or `category` - Never omit
 
-### 8. Documentation Completeness
+### 9. Documentation Completeness
 
 **Learning**: Comprehensive documentation reduces support burden.
 
