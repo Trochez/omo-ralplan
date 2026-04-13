@@ -32,3 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Usage examples for all modes
 - Architecture diagrams
 - Troubleshooting guide
+- Configuration guide (`docs/configuration.md`)
+- Session learnings document (`docs/learnings.md`)
+- Example files for all usage patterns
+
+### Design Decisions
+- Use native `task()` instead of MCP tools for portability
+- Sequential consensus workflow (Architect before Critic)
+- Environment variable timeouts for configurability
+- Graceful degradation for resilience
+- Pre-execution gate to prevent wasted cycles

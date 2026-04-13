@@ -16,6 +16,7 @@
 8. [Configuration](#configuration)
 9. [Troubleshooting](#troubleshooting)
 10. [Architecture](#architecture)
+11. [Learnings & Design Decisions](docs/learnings.md)
 
 ---
 
