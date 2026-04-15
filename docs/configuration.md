@@ -132,6 +132,61 @@ OMO-Ralplan is model-agnostic. Configure models in `oh-my-opencode.json`:
 }
 ```
 
+### Provider-Level Timeout Configuration
+
+**CRITICAL**: To prevent 30-minute freezes when models hit rate limits, configure provider-level timeouts:
+
+```json
+{
+  "provider": {
+    "nvidia": {
+      "timeout": 60000
+    },
+    "openai": {
+      "timeout": 60000
+    },
+    "google": {
+      "timeout": 60000
+    }
+  },
+  "background_task": {
+    "staleTimeoutMs": 60000
+  }
+}
+```
+
+**Why this matters:**
+- Default background task timeout is 30 minutes (1,800,000ms)
+- Provider timeout forces fallback after 60 seconds
+- Background task timeout overrides the hardcoded default
+- Without this, delegated agents can freeze for 30 minutes on rate limits
+
+**Known Issue (GitHub #2203):** Background tasks may ignore `fallback_models` configuration. Use provider-level timeouts as a workaround.
+
+### Fallback Model Configuration
+
+Configure fallback models for resilience:
+
+```json
+{
+  "agents": {
+    "oracle": {
+      "model": "nvidia/z-ai/glm5",
+      "fallback_models": [
+        "openai/gpt-5.4",
+        "nvidia/nvidia/nemotron-3-super-120b-a12b"
+      ]
+    }
+  }
+}
+```
+
+**Fallback chain behavior:**
+1. Primary model is attempted first
+2. If primary fails/times out, first fallback is tried
+3. If first fallback fails, second fallback is tried
+4. Process continues until a model responds or all options exhausted
+
 ### Reasoning Effort Recommendations
 
 | Task | Recommended Effort |
